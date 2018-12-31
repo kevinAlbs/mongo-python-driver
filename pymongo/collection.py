@@ -50,6 +50,8 @@ from pymongo.results import (BulkWriteResult,
                              InsertManyResult,
                              UpdateResult)
 from pymongo.write_concern import WriteConcern
+import pymongocrypt
+import bson
 
 _NO_OBJ_ERROR = "No matching object found"
 _UJOIN = u"%s.%s"
@@ -686,6 +688,17 @@ class Collection(common.BaseObject):
             document["_id"] = ObjectId()
 
         write_concern = self._write_concern_for(session)
+
+        client = self.__database.client
+        if client._crypt_enabled:
+            schema = None
+            for entry in client._crypt_schemas:
+                if entry["ns"] == self.full_name:
+                    schema = entry["schema"]
+
+            encrypted_data = pymongocrypt.encrypt(bson.BSON.encode(schema), bson.BSON.encode(document))
+            document = bson.BSON.decode(bson.BSON(encrypted_data))
+
         return InsertOneResult(
             self._insert(document,
                          write_concern=write_concern,
@@ -1260,6 +1273,11 @@ class Collection(common.BaseObject):
 
         cursor = self.find(filter, *args, **kwargs)
         for result in cursor.limit(-1):
+            client = self.__database.client
+            if client._crypt_enabled:
+                decrypted_data = pymongocrypt.decrypt(bson.BSON.encode(result))
+                result = bson.BSON.decode(bson.BSON(decrypted_data))
+
             return result
         return None
 

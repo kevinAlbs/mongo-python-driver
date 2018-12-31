@@ -73,6 +73,8 @@ from pymongo.topology_description import TOPOLOGY_TYPE
 from pymongo.settings import TopologySettings
 from pymongo.write_concern import DEFAULT_WRITE_CONCERN
 
+import pymongocrypt
+
 
 class MongoClient(common.BaseObject):
     """
@@ -608,6 +610,14 @@ class MongoClient(common.BaseObject):
         self_ref = weakref.ref(self, executor.close)
         self._kill_cursors_executor = executor
         executor.open()
+
+        self._crypt_enabled = False
+        crypt_args = kwargs.pop('client_side_encryption', None)
+        if crypt_args:
+            pymongocrypt.setup(crypt_args["awsRegion"], crypt_args["awsAccessKeyId"],crypt_args["awsSecretAccessKey"])
+            self._crypt_enabled = True
+            self._crypt_schemas = crypt_args["schemas"]
+
 
     def _cache_credentials(self, source, credentials, connect=False):
         """Save a set of authentication credentials.
@@ -1897,6 +1907,8 @@ class MongoClient(common.BaseObject):
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._crypt_enabled:
+            pymongocrypt.cleanup()
         self.close()
 
     def __iter__(self):

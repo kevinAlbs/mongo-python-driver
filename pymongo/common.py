@@ -482,6 +482,16 @@ def validate_is_callable_or_none(option, value):
     return value
 
 
+def validate_client_side_encryption_or_none(option, value):
+    if value is None:
+        return value
+    if not isinstance(value, dict):
+        raise TypeError("%s must be a dictionary" % option)
+    if not all(arg in value for arg in ["awsRegion", "awsAccessKeyId", "awsSecretAccessKey", "schemas"]):
+        raise ConfigurationError("Must specify awsRegion, awsAccessKeyId, and awsSecretAccessKey, and schemas in %s" % option)
+    return value
+
+
 def validate_ok_for_replace(replacement):
     """Validate a replacement document."""
     validate_is_mapping("replacement", replacement)
@@ -582,6 +592,7 @@ KW_VALIDATORS = {
     'username': validate_string_or_none,
     'password': validate_string_or_none,
     'server_selector': validate_is_callable_or_none,
+    "client_side_encryption": validate_client_side_encryption_or_none
 }
 
 URI_VALIDATORS.update(TIMEOUT_VALIDATORS)
