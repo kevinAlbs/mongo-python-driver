@@ -9,10 +9,10 @@
 # To print stdout:
 # python -m pytest ./test/test_bulk_write.py -k test_can_return_multiple_WCE --capture=no
 
-from pymongo import MongoClient
+from pymongo import MongoClient, monitoring
 from pymongo.collection import Collection
 from pymongo.operations import InsertOne, UpdateOne, DeleteOne
-from pymongo.errors import BulkWriteError
+from pymongo.errors import BulkWriteError, OperationFailure
 
 import unittest
 
@@ -59,6 +59,46 @@ class test_bulk_write_old (unittest.TestCase):
         ], ordered=False)
         # With an unordered bulk write, models are grouped. Pymongo groups inserts before Deletes. This results in the inserted document being deleted.
         self.assertCollectionEqual(coll, [])
+
+
+    class StoreStarted(monitoring.CommandListener):
+        def __init__(self):
+            self.started_commands = []
+
+        def started(self, event : monitoring.CommandStartedEvent):
+            self.started_commands.append(event.command_name)
+
+        def succeeded(self, _):
+            pass
+
+        def failed(self, _):
+            pass
+
+    # Test that a command error in an unordered bulk write results in an immediate exception.
+    def test_insert_update_unordered_command_failure (self):
+        monitor = self.StoreStarted()
+        client = MongoClient(appname="test_insert_update_unordered_command_failure", event_listeners=[monitor])
+        coll = client["db"]["coll"]
+        
+        # Set a failpoint on both the "insert" and "update" commands.
+        client["admin"].command({
+                "configureFailPoint": "failCommand",
+                "mode": {"times": 2},
+                "data": {
+                    "errorCode": 2,
+                    "failCommands": ["insert", "update"],
+                    # set `appName` to scope the failpoint to this MongoClient.
+                    "appName": "test_insert_update_unordered_command_failure"}
+        })
+
+        with self.assertRaises(OperationFailure):
+            coll.bulk_write([
+                InsertOne({'_id': 1}),
+                UpdateOne({'_id': 1}, {'$set': { 'a': 1}})
+            ], ordered=False)
+
+        # Only the 'insert' command is sent, not the 'update'.
+        self.assertListEqual (monitor.started_commands, ["configureFailPoint", "insert"])
 
 if __name__ == "__main__":
     unittest.main()
