@@ -25,6 +25,7 @@ from copy import deepcopy
 from typing import (
     TYPE_CHECKING,
     Any,
+    Callable,
     Dict,
     Generator,
     Generic,
@@ -162,6 +163,9 @@ class _EncryptionIO(MongoCryptCallback):  # type: ignore[misc]
         self.opts = opts
         self._spawned = False
         self._kms_ssl_contexts = opts._kms_ssl_contexts(_IS_SYNC)
+        self._kms_connect_callback: Optional[Callable[[str, int], socket.socket]] = getattr(
+            opts, "_kms_connect_callback", None
+        )
 
     def kms_request(self, kms_context: MongoCryptKmsContext) -> None:
         """Complete a KMS request.
@@ -170,6 +174,61 @@ class _EncryptionIO(MongoCryptCallback):  # type: ignore[misc]
 
         :return: None
         """
+        if self._kms_connect_callback is not None:
+            endpoint = kms_context.endpoint
+            message = kms_context.message
+            provider = kms_context.kms_provider
+            address = parse_host(endpoint, _HTTPS_PORT)
+            host, port = address
+            ctx = self._kms_ssl_contexts.get(provider)
+            if ctx is None:
+                ctx = get_ssl_context(
+                    None,  # certfile
+                    None,  # passphrase
+                    None,  # ca_certs
+                    None,  # crlfile
+                    False,  # allow_invalid_certificates
+                    False,  # allow_invalid_hostnames
+                    False,  # disable_ocsp_endpoint_check
+                    _IS_SYNC,
+                )
+            sleep_u = kms_context.usleep
+            if sleep_u:
+                time.sleep(float(sleep_u) / 1e6)
+            try:
+                raw_sock = self._kms_connect_callback(host, port)
+                conn = ctx.wrap_socket(raw_sock, server_hostname=host)
+                try:
+                    sendall(conn, message)
+                    while kms_context.bytes_needed > 0:
+                        data = conn.recv(kms_context.bytes_needed)
+                        if not data:
+                            raise OSError("KMS connection closed")
+                        kms_context.feed(data)
+                except MongoCryptError:
+                    raise
+                except Exception as exc:
+                    if isinstance(exc, BLOCKING_IO_ERRORS):
+                        exc = socket.timeout("timed out")
+                    msg_prefix = "KMS connection closed" if isinstance(exc, OSError) else None
+                    _raise_connection_failure(address, exc, msg_prefix=msg_prefix)
+                finally:
+                    conn.close()
+            except MongoCryptError:
+                raise
+            except Exception as exc:
+                remaining = _csot.remaining()
+                if isinstance(exc, NetworkTimeout) or (remaining is not None and remaining <= 0):
+                    raise
+                try:
+                    kms_context.fail()
+                except MongoCryptError as final_err:
+                    exc = MongoCryptError(
+                        f"{final_err}, last attempt failed with: {exc}", final_err.code
+                    )
+                    raise exc from final_err
+            return
+
         endpoint = kms_context.endpoint
         message = kms_context.message
         provider = kms_context.kms_provider
@@ -592,6 +651,7 @@ class ClientEncryption(Generic[_DocumentType]):
         key_vault_client: MongoClient[_DocumentTypeArg],
         codec_options: CodecOptions[_DocumentTypeArg],
         kms_tls_options: Optional[Mapping[str, Any]] = None,
+        kms_connect_callback: Optional[Callable[[str, int], socket.socket]] = None,
         key_expiration_ms: Optional[int] = None,
     ) -> None:
         """Explicit client-side field level encryption.
@@ -659,6 +719,11 @@ class ClientEncryption(Generic[_DocumentType]):
             Or to supply a client certificate::
 
               kms_tls_options={'kmip': {'tlsCertificateKeyFile': 'client.pem'}}
+        :param kms_connect_callback: An optional callback invoked to create a
+            socket for each KMS request. The callback receives ``(host, port)``
+            and must return a connected, plain (non-TLS) :class:`socket.socket`.
+            The driver wraps the returned socket with TLS. Use this to route KMS
+            requests through an HTTP proxy.
         :param key_expiration_ms: The cache expiration time for data encryption keys.
             Defaults to ``None`` which defers to libmongocrypt's default which is currently 60000.
             Set to 0 to disable key expiration.
@@ -701,6 +766,7 @@ class ClientEncryption(Generic[_DocumentType]):
             kms_providers,
             key_vault_namespace,
             kms_tls_options=kms_tls_options,
+            kms_connect_callback=kms_connect_callback,
             key_expiration_ms=key_expiration_ms,
         )
         self._kms_ssl_contexts = _parse_kms_tls_options(opts._kms_tls_options, _IS_SYNC)

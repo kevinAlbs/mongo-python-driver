@@ -18,7 +18,8 @@
 """
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Mapping, Optional, TypedDict
+import socket
+from typing import TYPE_CHECKING, Any, Callable, Mapping, Optional, TypedDict
 
 from pymongo.uri_parser_shared import _parse_kms_tls_options
 
@@ -67,6 +68,7 @@ class AutoEncryptionOpts:
         mongocryptd_spawn_path: str = "mongocryptd",
         mongocryptd_spawn_args: Optional[list[str]] = None,
         kms_tls_options: Optional[Mapping[str, Any]] = None,
+        kms_connect_callback: Optional[Callable[[str, int], socket.socket]] = None,
         crypt_shared_lib_path: Optional[str] = None,
         crypt_shared_lib_required: bool = False,
         bypass_query_analysis: bool = False,
@@ -177,6 +179,19 @@ class AutoEncryptionOpts:
             Or to supply a client certificate::
 
               kms_tls_options={'kmip': {'tlsCertificateKeyFile': 'client.pem'}}
+        :param kms_connect_callback: An optional callback invoked to create a
+            socket for each KMS request. The callback receives ``(host, port)``
+            and must return a connected, plain (non-TLS) :class:`socket.socket`.
+            The driver wraps the returned socket with TLS. Use this to route KMS
+            requests through an HTTP proxy::
+
+              def connect_via_proxy(host, port):
+                  sock = socket.create_connection(("proxy.example.com", 8080))
+                  sock.sendall(f"CONNECT {host}:{port} HTTP/1.1\\r\\nHost: {host}:{port}\\r\\n\\r\\n".encode())
+                  # read until \\r\\n\\r\\n and verify 200 status
+                  return sock
+
+              opts = AutoEncryptionOpts(..., kms_connect_callback=connect_via_proxy)
         :param crypt_shared_lib_path: Override the path to load the crypt_shared library.
         :param crypt_shared_lib_required: If True, raise an error if libmongocrypt is
             unable to load the crypt_shared library.
@@ -252,6 +267,7 @@ class AutoEncryptionOpts:
             self._mongocryptd_spawn_args.append("--idleShutdownTimeoutSecs=60")
         # Maps KMS provider name to a SSLContext.
         self._kms_tls_options = kms_tls_options
+        self._kms_connect_callback = kms_connect_callback
         self._sync_kms_ssl_contexts: Optional[dict[str, SSLContext]] = None
         self._async_kms_ssl_contexts: Optional[dict[str, SSLContext]] = None
         self._bypass_query_analysis = bypass_query_analysis
